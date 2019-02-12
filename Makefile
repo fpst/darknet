@@ -132,6 +132,10 @@ endif
 $(EXEC): $(OBJS)
 	$(CPP) -std=c++11 $(COMMON) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
+libdarknet.a: $(OBJS)
+	rm -f libdarknet.a
+	ar -qcs libdarknet.a $(OBJS)
+
 $(OBJDIR)%.o: %.c $(DEPS)
 	$(CC) $(COMMON) $(CFLAGS) -c $< -o $@
 
@@ -153,5 +157,5 @@ setchmod:
 .PHONY: clean
 
 clean:
-	rm -rf $(OBJS) $(EXEC) $(LIBNAMESO) $(APPNAMESO)
+	rm -rf $(OBJS) $(EXEC) $(LIBNAMESO) $(APPNAMESO) libdarknet.a
 
