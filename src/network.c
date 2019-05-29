@@ -140,6 +140,8 @@ char *get_layer_string(LAYER_TYPE a)
             return "rnn";
         case GRU:
             return "gru";
+        case LSTM:
+            return "lstm";
         case CRNN:
             return "crnn";
         case MAXPOOL:
@@ -178,16 +180,16 @@ network make_network(int n)
 {
     network net = {0};
     net.n = n;
-    net.layers = calloc(net.n, sizeof(layer));
-    net.seen = calloc(1, sizeof(uint64_t));
+    net.layers = (layer*)calloc(net.n, sizeof(layer));
+    net.seen = (uint64_t*)calloc(1, sizeof(uint64_t));
 #ifdef GPU
-    net.input_gpu = calloc(1, sizeof(float *));
-    net.truth_gpu = calloc(1, sizeof(float *));
+    net.input_gpu = (float**)calloc(1, sizeof(float*));
+    net.truth_gpu = (float**)calloc(1, sizeof(float*));
 
-    net.input16_gpu = calloc(1, sizeof(float *));
-    net.output16_gpu = calloc(1, sizeof(float *));
-    net.max_input16_size = calloc(1, sizeof(size_t));
-    net.max_output16_size = calloc(1, sizeof(size_t));
+    net.input16_gpu = (float**)calloc(1, sizeof(float*));
+    net.output16_gpu = (float**)calloc(1, sizeof(float*));
+    net.max_input16_size = (size_t*)calloc(1, sizeof(size_t));
+    net.max_output16_size = (size_t*)calloc(1, sizeof(size_t));
 #endif
     return net;
 }
@@ -199,7 +201,7 @@ void forward_network(network net, network_state state)
     for(i = 0; i < net.n; ++i){
         state.index = i;
         layer l = net.layers[i];
-        if(l.delta){
+        if(l.delta && state.train){
             scal_cpu(l.outputs * l.batch, 0, l.delta, 1);
         }
         //double time = get_time_point();
@@ -298,8 +300,8 @@ float train_network_datum(network net, float *x, float *y)
 float train_network_sgd(network net, data d, int n)
 {
     int batch = net.batch;
-    float *X = calloc(batch*d.X.cols, sizeof(float));
-    float *y = calloc(batch*d.y.cols, sizeof(float));
+    float* X = (float*)calloc(batch * d.X.cols, sizeof(float));
+    float* y = (float*)calloc(batch * d.y.cols, sizeof(float));
 
     int i;
     float sum = 0;
@@ -318,8 +320,8 @@ float train_network(network net, data d)
     assert(d.X.rows % net.batch == 0);
     int batch = net.batch;
     int n = d.X.rows / batch;
-    float *X = calloc(batch*d.X.cols, sizeof(float));
-    float *y = calloc(batch*d.y.cols, sizeof(float));
+    float* X = (float*)calloc(batch * d.X.cols, sizeof(float));
+    float* y = (float*)calloc(batch * d.y.cols, sizeof(float));
 
     int i;
     float sum = 0;
@@ -358,34 +360,63 @@ float train_network_batch(network net, data d, int n)
     return (float)sum/(n*batch);
 }
 
+int recalculate_workspace_size(network *net)
+{
+#ifdef GPU
+    cuda_set_device(net->gpu_index);
+    if (gpu_index >= 0) cuda_free(net->workspace);
+#endif
+    int i;
+    size_t workspace_size = 0;
+    for (i = 0; i < net->n; ++i) {
+        layer l = net->layers[i];
+        //printf(" %d: layer = %d,", i, l.type);
+        if (l.type == CONVOLUTIONAL) {
+            l.workspace_size = get_convolutional_workspace_size(l);
+        }
+        else if (l.type == CONNECTED) {
+            l.workspace_size = get_connected_workspace_size(l);
+        }
+        if (l.workspace_size > workspace_size) workspace_size = l.workspace_size;
+        net->layers[i] = l;
+    }
+
+#ifdef GPU
+    if (gpu_index >= 0) {
+        printf("\n try to allocate additional workspace_size = %1.2f MB \n", (float)workspace_size / 1000000);
+        net->workspace = cuda_make_array(0, workspace_size / sizeof(float) + 1);
+        printf(" CUDA allocate done! \n");
+    }
+    else {
+        free(net->workspace);
+        net->workspace = (float*)calloc(1, workspace_size);
+    }
+#else
+    free(net->workspace);
+    net->workspace = (float*)calloc(1, workspace_size);
+#endif
+    //fprintf(stderr, " Done!\n");
+    return 0;
+}
+
 void set_batch_network(network *net, int b)
 {
     net->batch = b;
     int i;
     for(i = 0; i < net->n; ++i){
         net->layers[i].batch = b;
+
 #ifdef CUDNN
         if(net->layers[i].type == CONVOLUTIONAL){
             cudnn_convolutional_setup(net->layers + i, cudnn_fastest);
-            /*
-            layer *l = net->layers + i;
-            cudnn_convolutional_setup(l, cudnn_fastest);
-            // check for excessive memory consumption
-            size_t free_byte;
-            size_t total_byte;
-            check_error(cudaMemGetInfo(&free_byte, &total_byte));
-            if (l->workspace_size > free_byte || l->workspace_size >= total_byte / 2) {
-                printf(" used slow CUDNN algo without Workspace! \n");
-                cudnn_convolutional_setup(l, cudnn_smallest);
-                l->workspace_size = get_workspace_size(*l);
-            }
-            */
         }
         else if (net->layers[i].type == MAXPOOL) {
             cudnn_maxpool_setup(net->layers + i);
         }
 #endif
+
     }
+    recalculate_workspace_size(net); // recalculate workspace size
 }
 
 int resize_network(network *net, int w, int h)
@@ -457,25 +488,26 @@ int resize_network(network *net, int w, int h)
     const int size = get_network_input_size(*net) * net->batch;
 #ifdef GPU
     if(gpu_index >= 0){
-        printf(" try to allocate workspace = %zu * sizeof(float), ", workspace_size / sizeof(float) + 1);
+        printf(" try to allocate additional workspace_size = %1.2f MB \n", (float)workspace_size / 1000000);
         net->workspace = cuda_make_array(0, workspace_size/sizeof(float) + 1);
         net->input_state_gpu = cuda_make_array(0, size);
         if (cudaSuccess == cudaHostAlloc(&net->input_pinned_cpu, size * sizeof(float), cudaHostRegisterMapped))
             net->input_pinned_cpu_flag = 1;
         else {
-            net->input_pinned_cpu = calloc(size, sizeof(float));
+            cudaGetLastError(); // reset CUDA-error
+            net->input_pinned_cpu = (float*)calloc(size, sizeof(float));
             net->input_pinned_cpu_flag = 0;
         }
         printf(" CUDA allocate done! \n");
     }else {
         free(net->workspace);
-        net->workspace = calloc(1, workspace_size);
+        net->workspace = (float*)calloc(1, workspace_size);
         if(!net->input_pinned_cpu_flag)
-            net->input_pinned_cpu = realloc(net->input_pinned_cpu, size * sizeof(float));
+            net->input_pinned_cpu = (float*)realloc(net->input_pinned_cpu, size * sizeof(float));
     }
 #else
     free(net->workspace);
-    net->workspace = calloc(1, workspace_size);
+    net->workspace = (float*)calloc(1, workspace_size);
 #endif
     //fprintf(stderr, " Done!\n");
     return 0;
@@ -502,7 +534,7 @@ detection_layer get_network_detection_layer(network net)
         }
     }
     fprintf(stderr, "Detection layer not found!!\n");
-    detection_layer l = {0};
+    detection_layer l = { (LAYER_TYPE)0 };
     return l;
 }
 
@@ -553,6 +585,12 @@ void top_predictions(network net, int k, int *index)
     top_k(out, size, k, index);
 }
 
+// A version of network_predict that uses a pointer for the network
+// struct to make the python binding work properly.
+float *network_predict_ptr(network *net, float *input)
+{
+    return network_predict(*net, input);
+}
 
 float *network_predict(network net, float *input)
 {
@@ -594,11 +632,11 @@ detection *make_network_boxes(network *net, float thresh, int *num)
     int i;
     int nboxes = num_detections(net, thresh);
     if (num) *num = nboxes;
-    detection *dets = calloc(nboxes, sizeof(detection));
+    detection* dets = (detection*)calloc(nboxes, sizeof(detection));
     for (i = 0; i < nboxes; ++i) {
-        dets[i].prob = calloc(l.classes, sizeof(float));
+        dets[i].prob = (float*)calloc(l.classes, sizeof(float));
         if (l.coords > 4) {
-            dets[i].mask = calloc(l.coords - 4, sizeof(float));
+            dets[i].mask = (float*)calloc(l.coords - 4, sizeof(float));
         }
     }
     return dets;
@@ -607,10 +645,10 @@ detection *make_network_boxes(network *net, float thresh, int *num)
 
 void custom_get_region_detections(layer l, int w, int h, int net_w, int net_h, float thresh, int *map, float hier, int relative, detection *dets, int letter)
 {
-    box *boxes = calloc(l.w*l.h*l.n, sizeof(box));
-    float **probs = calloc(l.w*l.h*l.n, sizeof(float *));
+    box* boxes = (box*)calloc(l.w * l.h * l.n, sizeof(box));
+    float** probs = (float**)calloc(l.w * l.h * l.n, sizeof(float*));
     int i, j;
-    for (j = 0; j < l.w*l.h*l.n; ++j) probs[j] = calloc(l.classes, sizeof(float));
+    for (j = 0; j < l.w*l.h*l.n; ++j) probs[j] = (float*)calloc(l.classes, sizeof(float));
     get_region_boxes(l, 1, 1, thresh, probs, boxes, 0, map);
     for (j = 0; j < l.w*l.h*l.n; ++j) {
         dets[j].classes = l.classes;
@@ -728,10 +766,18 @@ char *detection_to_json(detection *dets, int nboxes, int classes, char **names, 
 float *network_predict_image(network *net, image im)
 {
     //image imr = letterbox_image(im, net->w, net->h);
-    image imr = resize_image(im, net->w, net->h);
-    set_batch_network(net, 1);
-    float *p = network_predict(*net, imr.data);
-    free_image(imr);
+    float *p;
+    if(net->batch != 1) set_batch_network(net, 1);
+    if (im.w == net->w && im.h == net->h) {
+        // Input image is the same size as our net, predict on that image
+        p = network_predict(*net, im.data);
+    }
+    else {
+        // Need to resize image to the desired size for the net
+        image imr = resize_image(im, net->w, net->h);
+        p = network_predict(*net, imr.data);
+        free_image(imr);
+    }
     return p;
 }
 
@@ -743,7 +789,7 @@ matrix network_predict_data_multi(network net, data test, int n)
     int i,j,b,m;
     int k = get_network_output_size(net);
     matrix pred = make_matrix(test.X.rows, k);
-    float *X = calloc(net.batch*test.X.rows, sizeof(float));
+    float* X = (float*)calloc(net.batch * test.X.rows, sizeof(float));
     for(i = 0; i < test.X.rows; i += net.batch){
         for(b = 0; b < net.batch; ++b){
             if(i+b == test.X.rows) break;
@@ -768,7 +814,7 @@ matrix network_predict_data(network net, data test)
     int i,j,b;
     int k = get_network_output_size(net);
     matrix pred = make_matrix(test.X.rows, k);
-    float *X = calloc(net.batch*test.X.cols, sizeof(float));
+    float* X = (float*)calloc(net.batch * test.X.cols, sizeof(float));
     for(i = 0; i < test.X.rows; i += net.batch){
         for(b = 0; b < net.batch; ++b){
             if(i+b == test.X.rows) break;
@@ -929,7 +975,7 @@ void fuse_conv_batchnorm(network net)
     }
 }
 
-
+void forward_blank_layer(layer l, network_state state) {}
 
 void calculate_binary_weights(network net)
 {
@@ -942,7 +988,7 @@ void calculate_binary_weights(network net)
 
             if (l->xnor) {
                 //printf("\n %d \n", j);
-                l->lda_align = 256; // 256bit for AVX2
+                //l->lda_align = 256; // 256bit for AVX2    // set in make_convolutional_layer()
                 //if (l->size*l->size*l->c >= 2048) l->lda_align = 512;
 
                 binary_align_weights(l);
@@ -950,6 +996,21 @@ void calculate_binary_weights(network net)
                 if (net.layers[j].use_bin_output) {
                     l->activation = LINEAR;
                 }
+
+#ifdef GPU
+                // fuse conv_xnor + shortcut -> conv_xnor
+                if ((j + 1) < net.n && net.layers[j].type == CONVOLUTIONAL) {
+                    layer *sc = &net.layers[j + 1];
+                    if (sc->type == SHORTCUT && sc->w == sc->out_w && sc->h == sc->out_h && sc->c == sc->out_c)
+                    {
+                        l->bin_conv_shortcut_in_gpu = net.layers[net.layers[j + 1].index].output_gpu;
+                        l->bin_conv_shortcut_out_gpu = net.layers[j + 1].output_gpu;
+
+                        net.layers[j + 1].type = BLANK;
+                        net.layers[j + 1].forward_gpu = forward_blank_layer;
+                    }
+                }
+#endif  // GPU
             }
         }
     }

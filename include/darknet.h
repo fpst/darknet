@@ -8,9 +8,11 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <pthread.h>
 #include <stdint.h>
+#include <assert.h>
+#include <pthread.h>
 
+#ifndef LIB_API
 #ifdef LIB_EXPORTS
 #if defined(_MSC_VER)
 #define LIB_API __declspec(dllexport)
@@ -24,9 +26,12 @@
 #define LIB_API
 #endif
 #endif
+#endif
+
+#define NFRAMES 3
+#define SECRET_NUM -1234
 
 #ifdef GPU
-#define BLOCK 512
 
 #include "cuda_runtime.h"
 #include "curand.h"
@@ -45,7 +50,7 @@ struct network;
 typedef struct network network;
 
 struct network_state;
-typedef struct network_state;
+typedef struct network_state network_state;
 
 struct layer;
 typedef struct layer layer;
@@ -68,8 +73,6 @@ typedef struct metadata metadata;
 struct tree;
 typedef struct tree tree;
 
-
-#define SECRET_NUM -1234
 extern int gpu_index;
 
 // option_list.h
@@ -364,7 +367,9 @@ struct layer {
     float *c_cpu;
     float *dc_cpu;
 
-    float * binary_input;
+    float *binary_input;
+    uint32_t *bin_re_packed_input;
+    char *t_bit_input;
 
     struct layer *input_layer;
     struct layer *self_layer;
@@ -456,6 +461,8 @@ struct layer {
 
     float *binary_input_gpu;
     float *binary_weights_gpu;
+    float *bin_conv_shortcut_in_gpu;
+    float *bin_conv_shortcut_out_gpu;
 
     float * mean_gpu;
     float * variance_gpu;
@@ -744,6 +751,7 @@ LIB_API void do_nms_obj(detection *dets, int total, int classes, float thresh);
 
 // network.h
 LIB_API float *network_predict(network net, float *input);
+LIB_API float *network_predict_ptr(network *net, float *input);
 LIB_API detection *get_network_boxes(network *net, int w, int h, float thresh, float hier, int *map, int relative, int *num, int letter);
 LIB_API void free_detections(detection *dets, int n);
 LIB_API void fuse_conv_batchnorm(network net);
@@ -765,6 +773,7 @@ LIB_API void optimize_picture(network *net, image orig, int max_layer, float sca
 
 // image.h
 LIB_API image resize_image(image im, int w, int h);
+LIB_API void copy_image_from_bytes(image im, char *pdata);
 LIB_API image letterbox_image(image im, int w, int h);
 LIB_API void rgbgr_image(image im);
 LIB_API image make_image(int w, int h, int c);

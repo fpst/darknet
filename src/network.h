@@ -6,14 +6,14 @@
 #include <stdint.h>
 #include "layer.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 #include "image.h"
 #include "data.h"
 #include "tree.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 /*
 typedef enum {
     CONSTANT, STEP, EXP, POLY, STEPS, SIG, RANDOM
@@ -122,6 +122,7 @@ float train_network_datum(network net, float *x, float *y);
 
 matrix network_predict_data(network net, data test);
 //LIB_API float *network_predict(network net, float *input);
+//LIB_API float *network_predict_ptr(network *net, float *input);
 float network_accuracy(network net, data d);
 float *network_accuracies(network net, data d, int n);
 float network_accuracy_multi(network net, data d, int n);
@@ -166,4 +167,3 @@ network combine_train_valid_networks(network net_train, network net_map);
 #endif
 
 #endif
-
